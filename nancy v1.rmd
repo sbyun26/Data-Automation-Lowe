@@ -87,7 +87,7 @@ cat("Saved plot to:", normalizePath(outfile), "\n")
 ```{r setup, include=FALSE}
 df_sa <- read_pivot(path, "SA", "SA")
 
-#coerce month to Date if it came in as POSIXct/character
+#coerce month to Date if it came in as POSIXct/characteri
 df_nsa <- df_nsa |> mutate(month = as_date(month))
 
 #compute MoM on full history
