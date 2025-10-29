@@ -5,76 +5,40 @@ date: "2025-10-28"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-# ---- Setup ----
-# Install packages once if needed:
-# install.packages(c("readxl","tidyverse","lubridate","janitor","scales"))
-
 library(readxl)
 library(tidyverse)
 library(lubridate)
 library(janitor)
 library(scales)
 
-path  <- "/Users/lllllnx/Desktop/August 2025 Data.xlsx"   
-# or another file; not hardcoded dates
-use_specific_month <- False         
-# TRUE = pick Aug 2024; FALSE = always latest month
+path <- "/Users/lllllnx/Desktop/August 2025 Data v2.xlsx"
 
-# ---- Load & standardize columns ----
-df_raw <- read_excel(path, sheet = sheet) |> clean_names()
-parse_month <- function(x) {
-  if (inherits(x, "Date")) return(as_date(floor_date(x, "month")))
-  suppressWarnings(coalesce(
-    ymd(x, quiet = TRUE),
-    ym(x, quiet = TRUE) |> as_date(),
-    my(x, quiet = TRUE) |> as_date(),
-    parse_date_time(x, orders = c("Y-m","Ym","b Y","m/Y","m-Y","Y/m/d","m/d/Y"), quiet = TRUE) |> as_date()
-  ))
+#read a sheet and pivot wide -> long
+read_pivot <- function(path, sheet, tag) {
+  read_excel(path, sheet = sheet) |>
+    clean_names() |>
+    # drop empty helper columns like 'unnamed_23' if present
+    select(-matches("^unnamed")) |>
+    # ensure the month column is called 'month'
+    rename(month = any_of("month")) |>
+    # pivot all non-month columns to key/value
+    pivot_longer(
+      cols = -month,
+      names_to = "industry",
+      values_to = "value"
+    ) |>
+    mutate(adjustment = tag)
 }
 
-# Load NSA from 4th tab ("Non-SA") and SA from "SA"
-df_nsa <- read_excel(path, sheet = "Non-SA") |> clean_names() |> mutate(adjustment = "NSA")
-df_sa  <- read_excel(path, sheet = "SA")      |> clean_names() |> mutate(adjustment = "SA")
+df_nsa <- read_pivot(path, "Non-SA", "NSA")
 
-df_raw <- bind_rows(df_nsa, df_sa)
+#coerce month to Date if it came in as POSIXct/character
+df_nsa <- df_nsa |> mutate(month = as_date(month))
 
-
-# Try to standardize to: date, industry, value
-# Add/adjust synonyms to fit your file’s headers if needed.
-df <- df_raw |>
-  rename(
-    date     = any_of(c("date","month","period","obs_date","ref_date")),
-    industry = any_of(c("industry","sector","naics","category","group")),
-    value    = any_of(c("value","level","index","amount","series_value"))
-  )
-
-# Parse dates robustly (handles Date, "YYYY-MM", "MMM YYYY", etc.)
-df <- df |>
-  mutate(
-    date = case_when(
-      inherits(date, "Date") ~ as.Date(date),
-      TRUE ~ suppressWarnings(
-        # Try multiple common monthly formats
-        coalesce(
-          ymd(date, quiet = TRUE),
-          ym(date, quiet = TRUE),
-          my(date, quiet = TRUE) |> as_date(),
-          parse_date_time(date, orders = c("Y-m", "Ym", "b Y", "m/Y", "m-Y", "Y/m/d", "m/d/Y"), quiet = TRUE) |> as_date()
-        )
-      )
-    )
-  )
-
-# Basic checks
-stopifnot(all(c("date","industry","value") %in% names(df)))
-df <- df |> filter(!is.na(date), !is.na(industry), !is.na(value))
-
-# ---- Compute latest month & changes vs prior month ----
-# Sort within industry, compute lag, then keep the latest month only (no hardcoding)
-df_calc <- df |>
-  group_by(industry) |>
-  arrange(date, .by_group = TRUE) |>
+#compute MoM on full history
+df_calc <- df_nsa |>
+  group_by(adjustment, industry) |>
+  arrange(month, .by_group = TRUE) |>
   mutate(
     prev_value = lag(value),
     abs_change = value - prev_value,
@@ -82,31 +46,31 @@ df_calc <- df |>
   ) |>
   ungroup()
 
-latest_date <- max(df_calc$date, na.rm = TRUE)
+latest_month <- max(df_calc$month, na.rm = TRUE)
 
 latest <- df_calc |>
-  filter(date == latest_date) |>
-  # keep industries that have a prior-month comparator
-  filter(!is.na(prev_value)) |>
+  filter(month == latest_month, !is.na(prev_value)) |>
   arrange(pct_change)
 
-# ---- Plot: MoM % change by industry (labels show % and abs change) ----
+#plot 
+stopifnot(nrow(latest) > 0)
+
 p <- ggplot(latest, aes(x = reorder(industry, pct_change), y = pct_change)) +
   geom_col(width = 0.7) +
   coord_flip() +
   geom_text(
     aes(label = paste0(
       percent(pct_change, accuracy = 0.1),
-      " (", comma(abs_change, accuracy = 0.1), ")"
+      " (", comma(abs_change, accuracy = 1), ")"
     )),
     hjust = -0.05, size = 3
   ) +
   expand_limits(y = max(0, max(latest$pct_change, na.rm = TRUE)) * 1.12) +
   labs(
-    title = paste0("Month-over-Month Change by Industry — ", format(latest_date, "%b %Y")),
-    subtitle = "Labels show % change and absolute level change vs previous month",
+    title    = paste0("Month-over-Month Change by Industry (NSA) — ", format(latest_month, "%b %Y")),
+    subtitle = "Labels show % change and absolute level change v.s. previous month",
     x = NULL,
-    y = "Percent change vs prior month",
+    y = "Percent change v.s. prior month",
     caption = "Source: internal monthly data"
   ) +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
@@ -115,30 +79,63 @@ p <- ggplot(latest, aes(x = reorder(industry, pct_change), y = pct_change)) +
 
 print(p)
 
-# ---- Save output (optional) ----
-out_dir <- "output"
-if (!dir.exists(out_dir)) dir.create(out_dir)
-out_file <- file.path(out_dir, paste0("industry_mom_", format(latest_date, "%Y_%m"), ".png"))
-ggsave(out_file, p, width = 10, height = 7, dpi = 300)
-
-# ---- Also return a tidy table for export/review (optional) ----
-latest_out <- latest |>
-  transmute(
-    date        = latest_date,
-    industry,
-    value,
-    prev_value,
-    abs_change,
-    pct_change
-  ) |>
-  arrange(desc(pct_change))
-
-# View in console:
-print(latest_out, n = Inf)
-
-# To export as CSV (optional):
-# write_csv(latest_out, file.path(out_dir, paste0("industry_mom_", format(latest_date, "%Y_%m"), ".csv")))
-
+outfile <- sprintf("MoM_by_industry_NSA_%s.png", format(max(latest$month), "%Y-%m"))
+ggsave(outfile, plot = p, width = 20, height = 10, dpi = 150)
+cat("Saved plot to:", normalizePath(outfile), "\n")
 ```
 
+```{r setup, include=FALSE}
+df_sa <- read_pivot(path, "SA", "SA")
+
+#coerce month to Date if it came in as POSIXct/character
+df_nsa <- df_nsa |> mutate(month = as_date(month))
+
+#compute MoM on full history
+df_calc <- df_nsa |>
+  group_by(adjustment, industry) |>
+  arrange(month, .by_group = TRUE) |>
+  mutate(
+    prev_value = lag(value),
+    abs_change = value - prev_value,
+    pct_change = (value / prev_value) - 1
+  ) |>
+  ungroup()
+
+latest_month <- max(df_calc$month, na.rm = TRUE)
+
+latest <- df_calc |>
+  filter(month == latest_month, !is.na(prev_value)) |>
+  arrange(pct_change)
+
+#plot 
+stopifnot(nrow(latest) > 0)
+
+p <- ggplot(latest, aes(x = reorder(industry, pct_change), y = pct_change)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  geom_text(
+    aes(label = paste0(
+      percent(pct_change, accuracy = 0.1),
+      " (", comma(abs_change, accuracy = 1), ")"
+    )),
+    hjust = -0.05, size = 3
+  ) +
+  expand_limits(y = max(0, max(latest$pct_change, na.rm = TRUE)) * 1.12) +
+  labs(
+    title    = paste0("Month-over-Month Change by Industry (SA) — ", format(latest_month, "%b %Y")),
+    subtitle = "Labels show % change and absolute level change v.s. previous month",
+    x = NULL,
+    y = "Percent change v.s. prior month",
+    caption = "Source: internal monthly data"
+  ) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p)
+
+outfile <- sprintf("MoM_by_industry_SA_%s.png", format(max(latest$month), "%Y-%m"))
+ggsave(outfile, plot = p, width = 20, height = 10, dpi = 150)
+cat("Saved plot to:", normalizePath(outfile), "\n")
+```
 
