@@ -1,0 +1,72 @@
+---
+title: "1104"
+output: html_notebook
+---
+```{r}
+install.packages("openxlsx")
+
+library(readxl)
+library(dplyr)
+library(lubridate)
+library(openxlsx)
+
+#read SA/NSA tab
+sa <- read_excel("/Users/lllllnx/Desktop/August 2025 Data v2.xlsx", sheet = "SA") |>
+  mutate(Month = as.Date(Month)) |>
+  arrange(Month)
+
+#pick numeric series columns 
+series_cols <- sa |>
+  select(where(is.numeric)) |>
+  select(-starts_with("Unnamed"), -contains("Civilian")) |>
+  colnames()
+
+#identify dates based on the latest available month
+latest_month <- max(sa$Month, na.rm = TRUE)
+month_ago <- latest_month %m-% months(1)
+year_ago  <- latest_month %m-% years(1)
+feb2020   <- as.Date("2020-02-01")
+
+# Use the closest available date in case exact ones are missing
+# define a function first
+get_closest <- function(df, target_date) {
+  df %>% slice(which.min(abs(as.numeric(Month - target_date))))
+}
+
+latest_row    <- get_closest(sa, latest_month)
+month_ago_row <- get_closest(sa, month_ago)
+year_ago_row  <- get_closest(sa, year_ago)
+feb2020_row   <- get_closest(sa, feb2020)
+
+#compute changes
+L   <- latest_row[, series_cols]
+M_1 <- month_ago_row[, series_cols]
+Y_1 <- year_ago_row[, series_cols]
+F20 <- feb2020_row[, series_cols]
+
+#level changes
+change_mom_level      <- L - M_1
+change_yoy_level      <- L - Y_1
+change_feb2020_level  <- L - F20
+
+#percent changes
+change_mom_percent     <- (change_mom_level / M_1) * 100
+change_yoy_percent     <- (change_yoy_level / Y_1) * 100
+change_feb2020_percent <- (change_feb2020_level / F20) * 100
+
+#combine into final table
+SA_summary_table <- bind_rows(
+  "MoM_Level"          = change_mom_level,
+  "MoM_Pct"        = change_mom_percent,
+  "Pre-covid_Level"  = change_feb2020_level,
+  "Pre-covid_Pct"  = change_feb2020_percent,
+  "YoY_Level"          = change_yoy_level,
+  "YoY_Pct"        = change_yoy_percent,
+  .id = "Metric"
+)
+
+#export to xlsx
+write.xlsx(SA_summary_table, "SA_summary_table.xlsx", rowNames = FALSE)
+
+```
+
